@@ -63,8 +63,8 @@ public sealed class AutoSignPlannerTests
     [Fact]
     public void InvalidPolicyIsRejectedInsteadOfSilentlyChanged()
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => new AutoSignPolicy(OffsetMinutes: -26).Validate());
-        Assert.Throws<ArgumentOutOfRangeException>(() => new AutoSignPolicy(MaxSubmissions: 4).Validate());
-        Assert.Throws<ArgumentOutOfRangeException>(() => new AutoSignPolicy(RetryMinutes: 3).Validate());
+        Assert.Throws<ArgumentOutOfRangeException>(() => new AutoSignPolicy(OffsetMinutes: -31).Validate());
+        Assert.Throws<ArgumentOutOfRangeException>(() => new AutoSignPolicy(MaxSubmissions: 11).Validate());
+        Assert.Throws<ArgumentOutOfRangeException>(() => new AutoSignPolicy(RetryMinutes: 4).Validate());
     }
 }

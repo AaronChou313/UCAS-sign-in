@@ -24,8 +24,8 @@ public class CourseTimeTests
     public void SignWindowUsesInclusiveStartExclusiveEnd()
     {
         var c = TestData.Course();
-        Assert.False(CourseTime.InSignWindow(c, c.Start!.Value.AddMinutes(-25).AddTicks(-1)));
-        Assert.True(CourseTime.InSignWindow(c, c.Start.Value.AddMinutes(-25)));
+        Assert.False(CourseTime.InSignWindow(c, c.Start!.Value.AddMinutes(-30).AddTicks(-1)));
+        Assert.True(CourseTime.InSignWindow(c, c.Start.Value.AddMinutes(-30)));
         Assert.False(CourseTime.InSignWindow(c, c.End!.Value));
         Assert.False(CourseTime.InSignWindow(c with
         {

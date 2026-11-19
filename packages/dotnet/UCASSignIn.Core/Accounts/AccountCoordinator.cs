@@ -3,7 +3,8 @@ namespace UCASSignIn.Core;
 // Platform-neutral account workflows. Views and observable UI state live in each application.
 // Call public operations on the platform UI context; asynchronous completions retain that context.
 public sealed partial class AccountCoordinator(ISchoolClient school, IAccountStore accounts, ICourseStore cache,
-    IRecordStore records, IReminderScheduler reminders, TimeProvider? timeProvider = null, ICourseCatalogStore? catalogStore = null)
+    IRecordStore records, IReminderScheduler reminders, TimeProvider? timeProvider = null, ICourseCatalogStore? catalogStore = null,
+    AutoSignPolicy? fixedAutoSignPolicy = null)
 {
     readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
     readonly ICourseCatalogStore? catalog = catalogStore ?? cache as ICourseCatalogStore;

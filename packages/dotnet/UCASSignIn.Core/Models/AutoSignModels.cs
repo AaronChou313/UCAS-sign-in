@@ -1,6 +1,6 @@
 namespace UCASSignIn.Core;
 
-public enum AutoSignMissedAction { Manual, TenMinuteGrace, UntilClassEnds }
+public enum AutoSignMissedAction { Manual, TenMinuteGrace, UntilClassEnds, UntilClassStarts }
 public enum AutoSignNotification { Problems, All, None }
 public enum AutoSignStage { Planned, Checking, Submitting, Verifying, RetryWaiting, Signed, Missed, NeedsAttention, Skipped }
 public enum AutoSignEventKind { Legacy, ExecutionStarted, Verification, Submission, Result, Missed, ManualTakeover, PlanChanged, Pause }
@@ -8,8 +8,9 @@ public enum AutoSignEventKind { Legacy, ExecutionStarted, Verification, Submissi
 public sealed record AutoSignPolicy(int OffsetMinutes = -5, AutoSignMissedAction MissedAction = AutoSignMissedAction.Manual,
     int MaxSubmissions = 3, int RetryMinutes = 2, AutoSignNotification Notification = AutoSignNotification.Problems)
 {
-    public bool IsValid => OffsetMinutes >= -25 && OffsetMinutes <= 240 && MaxSubmissions is >= 1 and <= 3
-        && RetryMinutes is 1 or 2 or 5 && Enum.IsDefined(MissedAction) && Enum.IsDefined(Notification);
+    public bool IsValid => OffsetMinutes >= -30 && OffsetMinutes <= 240 && MaxSubmissions is >= 1 and <= 10
+        && RetryMinutes is 1 or 2 or 3 or 5 && Enum.IsDefined(MissedAction) && Enum.IsDefined(Notification);
+    public static AutoSignPolicy BeforeClass { get; } = new(-29, AutoSignMissedAction.UntilClassStarts, 10, 3);
     public void Validate()
     {
         if (!IsValid) throw new ArgumentOutOfRangeException(nameof(AutoSignPolicy), "自动签到规则超出允许范围");
@@ -130,12 +131,14 @@ public sealed record AutoSignLedger(int Version, string AccountId, Dictionary<st
     {
         if (Version is not (1 or CurrentVersion) || AccountId != expectedAccountId || Executions is null
             || Executions.Any(x => x.Value is null || string.IsNullOrWhiteSpace(x.Key) || x.Value.Key != x.Key
-                || x.Value.Submissions is < 0 or > 3 || x.Value.NegativeReads is < 0 or > 2
+                || x.Value.Submissions is < 0 or > 10 || x.Value.NegativeReads is < 0 or > 2
                 || x.Value.Submissions > 0 && x.Value.LastSubmissionAt is null
                 || x.Value.Submissions == 0 && x.Value.LastSubmissionAt is not null
                 || x.Value.NegativeReads > 0 && x.Value.FirstNegativeAt is null
                 || x.Value.LastSubmissionQuerySequence is < 0 || x.Value.LastNegativeQuerySequence is < 0
-                || x.Value.Submissions == 0 && (x.Value.LastSchoolSubmissionAt is not null || x.Value.LastSchoolVerificationAttemptAt is not null || x.Value.LastSubmissionQuerySequence is not null)
+                || x.Value.Submissions == 0 && (x.Value.LastSchoolSubmissionAt is not null || x.Value.LastSubmissionQuerySequence is not null)
+                || x.Value.Submissions == 0 && x.Value.LastSchoolVerificationAttemptAt is not null
+                    && (x.Value.StartedAt is null || x.Value.LastVerificationAttemptAt is null)
                 || x.Value.NegativeReads == 0 && (x.Value.FirstSchoolNegativeAt is not null || x.Value.LastNegativeQuerySequence is not null)
                 || !Enum.IsDefined(x.Value.Stage) || x.Value.NotificationMode is { } mode && !Enum.IsDefined(mode) || x.Value.Events is null
                 || x.Value.Events.Any(e => e is null || !Enum.IsDefined(e.Stage) || !Enum.IsDefined(e.Kind))))
@@ -170,7 +173,8 @@ public static class AutoSignPlanner
         var at = occurrence?.At ?? start.AddMinutes(policy.OffsetMinutes);
         var key = Key(accountId, course);
         var participating = !signDisabled && (occurrence?.Enabled ?? CoursePreferences.Resolve(courseEnabled, true));
-        var afterActivation = enabledSince is null || at >= enabledSince;
+        var afterActivation = enabledSince is null || (policy.MissedAction == AutoSignMissedAction.UntilClassStarts
+            ? start > enabledSince : at >= enabledSince);
         var enabled = running && participating && afterActivation;
         var source = occurrence is { Enabled: not null } || occurrence?.At is not null || occurrence?.Policy?.HasValues == true
             ? "本次调整" : courseRule?.HasValues == true || courseEnabled != PreferenceOverride.Inherit ? "课程设置" : "账户默认";
@@ -178,6 +182,7 @@ public static class AutoSignPlanner
         {
             AutoSignMissedAction.Manual => at.AddSeconds(60),
             AutoSignMissedAction.TenMinuteGrace => at.AddMinutes(10),
+            AutoSignMissedAction.UntilClassStarts => start,
             _ => end
         };
         deadline = deadline < end ? deadline : end;
@@ -189,12 +194,12 @@ public static class AutoSignPlanner
             reason = signDisabled ? "本课程已禁用签到" : !afterActivation ? "开启前的课次已略过"
                 : !running ? "自动签到已暂停" : "自动签到未启用";
         }
-        else if (at < start.AddMinutes(-25) || at >= end)
+        else if (at < start.AddMinutes(-30) || at >= end)
         {
             stage = AutoSignStage.NeedsAttention;
             reason = "计划时间已超出签到窗口，请调整";
         }
-        else if (execution is null && now > deadline)
+        else if (execution is null && (policy.MissedAction == AutoSignMissedAction.UntilClassStarts ? now >= deadline : now > deadline))
         {
             stage = AutoSignStage.Missed;
             reason = "已错过计划时间，请手动处理";

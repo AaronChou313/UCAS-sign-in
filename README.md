@@ -4,6 +4,8 @@
 
 <h1 align="center">果壳签到</h1>
 
+本地 Web 版已添加到 `apps/web`。在仓库根目录运行 `./run-web.sh`，打开 <http://127.0.0.1:17861>。macOS 后台运行使用 `./scripts/web-service.sh start`，详细说明见 [Web 开发与运行说明](apps/web/README.md)。
+
 <p align="center">为国科大轻新课堂打造的多平台原生客户端，支持课表查询、课程签到、动态二维码生成和课程提醒。</p>
 <p align="center">iOS · iPadOS · macOS · Windows · Android </p>
 

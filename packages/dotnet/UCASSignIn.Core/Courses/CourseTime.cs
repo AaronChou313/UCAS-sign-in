@@ -64,7 +64,7 @@ public static class CourseTime
         catch (ArgumentOutOfRangeException) { return null; }
     }
     public static string Display(string time) => Parse("20000101", time)?.ToOffset(ShanghaiOffset).ToString("HH:mm") ?? "—";
-    public static bool InSignWindow(Course c, DateTimeOffset now) => c.Start is { } s && c.End is { } e && e > s && now >= s.AddMinutes(-25) && now < e;
+    public static bool InSignWindow(Course c, DateTimeOffset now) => c.Start is { } s && c.End is { } e && e > s && now >= s.AddMinutes(-30) && now < e;
     public static (Course? Current, Course? Next) CurrentAndNext(IEnumerable<Course> courses, DateTimeOffset now)
     {
         var today = DayKey(DateOnly.FromDateTime(now.ToOffset(ShanghaiOffset).DateTime));

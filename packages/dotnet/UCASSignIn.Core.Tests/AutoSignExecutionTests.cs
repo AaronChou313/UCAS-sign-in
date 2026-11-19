@@ -419,7 +419,7 @@ public sealed class AutoSignExecutionTests
 
     [Theory]
     [InlineData(-1, 0, false, false)]
-    [InlineData(4, 0, true, false)]
+    [InlineData(11, 0, true, false)]
     [InlineData(1, 0, false, false)]
     [InlineData(0, 0, true, false)]
     [InlineData(1, 1, true, false)]

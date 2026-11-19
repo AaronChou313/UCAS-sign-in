@@ -17,7 +17,8 @@ public sealed partial class AccountCoordinator
     readonly Dictionary<string, (DateTimeOffset At, long Timestamp)> autoSignActivationMarks = [];
     long? autoSignClockRetryTimestamp;
     DateTimeOffset? autoSignClockRetryAt => autoSignClockRetryTimestamp is { } started
-        ? clock.GetUtcNow() + TimeSpan.FromSeconds(30) - clock.GetElapsedTime(started) : null;
+        ? clock.GetUtcNow() + TimeSpan.FromSeconds(fixedAutoSignPolicy is null ? 30 : fixedAutoSignPolicy.RetryMinutes * 60)
+            - clock.GetElapsedTime(started) : null;
     DateTimeOffset AutoSignNow => autoSignSchoolSample is { } sample
         ? sample + clock.GetElapsedTime(autoSignSchoolTimestamp) : clock.GetUtcNow();
     DateTimeOffset SchoolTime(DateTimeOffset deviceTime) => deviceTime + (autoSignSchoolOffset ?? TimeSpan.Zero);
@@ -47,10 +48,12 @@ public sealed partial class AccountCoordinator
     bool AutoSignAllowed(Course course) => Preferences.AutoSignIsRunning
         && !HasLocalSignSuccess(course)
         && AutoSignPlans.Any(x => x.Key == AutoSignPlanner.Key(ActiveAccount?.Id ?? "", course)
-            && x.IsParticipating && x.Stage is not (AutoSignStage.Skipped or AutoSignStage.Signed or AutoSignStage.Missed or AutoSignStage.NeedsAttention));
+            && x.IsParticipating && x.Stage is not (AutoSignStage.Skipped or AutoSignStage.Signed or AutoSignStage.Missed)
+            && (x.Stage != AutoSignStage.NeedsAttention || fixedAutoSignPolicy is not null && AutoSignNow < x.Deadline));
     bool AutoSignConfigured(Course course)
     {
         var settings = PreferenceId(course) is { } id ? CoursePreferencesFor(id) : new();
+        if (fixedAutoSignPolicy is not null) return !settings.SignInDisabled && !HasLocalSignSuccess(course);
         var occurrence = Preferences.AutoSignOccurrences.GetValueOrDefault(AutoSignPlanner.Key(ActiveAccount?.Id ?? "", course));
         return !settings.SignInDisabled && !HasLocalSignSuccess(course)
             && (occurrence?.Enabled ?? CoursePreferences.Resolve(settings.AutoSign, true));
@@ -180,25 +183,35 @@ public sealed partial class AccountCoordinator
             ? SubmissionDue(plan, execution).AddSeconds(60) : plan.Deadline;
         return plan.Course.End is { } end && deadline > end ? end : deadline;
     }
+    bool PastSubmissionDeadline(AutoSignPlan plan, AutoSignExecution? execution, DateTimeOffset now) =>
+        plan.Policy.MissedAction == AutoSignMissedAction.UntilClassStarts
+            ? now >= SubmissionDeadline(plan, execution) : now > SubmissionDeadline(plan, execution);
     DateTimeOffset NextAutoSignAction(AutoSignPlan plan, AutoSignExecution? execution)
     {
         var due = SubmissionDue(plan, execution);
-        if (execution is { Submissions: > 0, LastSchoolSubmissionAt: null })
+        if (fixedAutoSignPolicy is not null)
+        {
+            if (execution?.LastSchoolVerificationAttemptAt is { } attempt && due < attempt.AddMinutes(plan.Policy.RetryMinutes))
+                due = attempt.AddMinutes(plan.Policy.RetryMinutes);
+        }
+        else if (execution is { Submissions: > 0, LastSchoolSubmissionAt: null })
             return execution.LastSchoolVerificationAttemptAt is { } legacyRead
-                ? legacyRead.AddMinutes(plan.Policy.RetryMinutes) : plan.Course.Start!.Value.AddMinutes(-25);
-        if (execution is { Submissions: > 0, LastSubmissionAt: { } last }
+                ? legacyRead.AddMinutes(plan.Policy.RetryMinutes) : plan.Course.Start!.Value.AddMinutes(-30);
+        else if (execution is { Submissions: > 0, LastSubmissionAt: { } last }
             && (execution.Submissions >= plan.Policy.MaxSubmissions || execution.Stage == AutoSignStage.NeedsAttention))
             due = execution.LastSchoolVerificationAttemptAt is { } attempt ? attempt.AddMinutes(plan.Policy.RetryMinutes)
                 : (execution.LastSchoolSubmissionAt ?? last).AddSeconds(30);
         else if (execution is { Submissions: > 0, NegativeReads: < 2, LastSchoolVerificationAttemptAt: { } attempt }
             && due < attempt.AddSeconds(30)) due = attempt.AddSeconds(30);
-        if (execution is { NegativeReads: 1, FirstSchoolNegativeAt: { } first } && due < first.AddSeconds(30))
+        if (fixedAutoSignPolicy is null && execution is { NegativeReads: 1, FirstSchoolNegativeAt: { } first } && due < first.AddSeconds(30))
             due = first.AddSeconds(30);
         if (autoSignClockRetryAt is { } retry)
         {
             var schoolRetry = AutoSignNow + (retry - clock.GetUtcNow());
             if (due < schoolRetry) due = schoolRetry;
         }
+        if (plan.Policy.MissedAction == AutoSignMissedAction.UntilClassStarts && due > plan.Deadline)
+            due = plan.Deadline;
         return due;
     }
     public DateTimeOffset? NextAutoSignWakeAt
@@ -209,13 +222,14 @@ public sealed partial class AccountCoordinator
                 || ActiveAccount is not { RequiresLogin: false }) return null;
             if (Preferences.AutoSignPausedUntil is { } until && until > AutoSignNow) return DeviceTime(until);
             return AutoSignPlans.Where(p => (p.IsParticipating || CanVerifyExisting(p)) && p.Stage != AutoSignStage.Signed
+                    && (p.Policy.MissedAction != AutoSignMissedAction.UntilClassStarts || p.NextAt is not null)
                     && (p.Stage is not (AutoSignStage.Skipped or AutoSignStage.Missed) || CanVerifyExisting(p))
                     && (p.Stage != AutoSignStage.NeedsAttention || autoSignExecutions.GetValueOrDefault(p.Key) is { Submissions: > 0 })
                     && (autoSignExecutions.GetValueOrDefault(p.Key) is not { Submissions: > 0 } || p.Course.End > AutoSignNow))
                 .Select(p => DeviceTime(p.NextAt ?? p.PlannedAt))
                 .Concat(autoSignSchoolOffset is null ? Courses.Concat(snapshots.Values.SelectMany(s => s.Courses))
                     .Where(c => AutoSignConfigured(c) && c.Start is not null && c.End > clock.GetUtcNow())
-                    .Select(c => c.Start!.Value.AddMinutes(-25)) : [])
+                    .Select(c => c.Start!.Value.AddMinutes(-30)) : [])
                 .Select(at => autoSignClockRetryAt is { } retry && at < retry ? retry : at)
                 .Cast<DateTimeOffset?>().DefaultIfEmpty().Min();
         }
@@ -238,6 +252,8 @@ public sealed partial class AccountCoordinator
         {
             if (epoch != Generation || ActiveAccount is not { } current || current.Id != account.Id) return;
             var preferences = current.Preferences.UnifyingAutoSign(current.Preferences.AutoSignSinceUsesSchoolTime ? AutoSignNow : clock.GetUtcNow());
+            if (fixedAutoSignPolicy is not null)
+                preferences = preferences with { AutoSignRule = fixedAutoSignPolicy, AutoSignPausedUntil = null };
             if (preferences == current.Preferences) return;
             var next = Updated(current with { Settings = preferences });
             try
@@ -273,8 +289,13 @@ public sealed partial class AccountCoordinator
                     var key = AutoSignPlanner.Key(account.Id, c);
                     var settings = PreferenceId(c) is { } preferenceId ? CoursePreferencesFor(preferenceId) : new CoursePreferences();
                     preferences.AutoSignOccurrences.TryGetValue(key, out var occurrence);
+                    if (fixedAutoSignPolicy is not null)
+                    {
+                        settings = settings with { AutoSign = PreferenceOverride.Inherit, AutoSignRule = null, AutoSignEnabledSince = null };
+                        occurrence = null;
+                    }
                     var execution = autoSignExecutions.GetValueOrDefault(key);
-                    var plan = AutoSignPlanner.Create(account.Id, c, preferences.AutoSignRule, settings.AutoSignRule,
+                    var plan = AutoSignPlanner.Create(account.Id, c, fixedAutoSignPolicy ?? preferences.AutoSignRule, settings.AutoSignRule,
                         occurrence, preferences.AutoSignIsRunning && (preferences.AutoSignPausedUntil is null || now >= preferences.AutoSignPausedUntil),
                         settings.AutoSign,
                         settings.SignInDisabled, now, execution,
@@ -282,7 +303,9 @@ public sealed partial class AccountCoordinator
                     if (plan is null) return null;
                     return HasLocalSignSuccess(c)
                         ? plan with { Stage = AutoSignStage.Signed, Reason = "本机已保存签到成功，自动任务已完成", NextAt = null }
-                        : plan with { NextAt = NextAutoSignAction(plan, execution) };
+                        : plan with { NextAt = plan.Policy.MissedAction == AutoSignMissedAction.UntilClassStarts
+                            && now >= plan.Deadline && execution?.Stage is AutoSignStage.NeedsAttention or AutoSignStage.Missed
+                                ? null : NextAutoSignAction(plan, execution) };
                 })
                 .OfType<AutoSignPlan>().OrderBy(x => x.NextAt).ThenBy(x => x.Key).ToArray();
         }
@@ -459,11 +482,12 @@ public sealed partial class AccountCoordinator
         if (!await FreezeAutoSignTimesAsync(epoch)) return false;
         schoolNow = AutoSignNow;
         var plan = AutoSignPlans.FirstOrDefault(x => x.Course.Id == course.Id && x.Course.Day == course.Day);
-        if (plan is null || plan.Stage is AutoSignStage.Skipped or AutoSignStage.Missed or AutoSignStage.NeedsAttention
+        if (plan is null || plan.Stage is AutoSignStage.Skipped or AutoSignStage.Missed
+            || plan.Stage == AutoSignStage.NeedsAttention && fixedAutoSignPolicy is null
             || !AutoSignAllowed(plan.Course) || !CourseTime.InSignWindow(plan.Course, schoolNow)) return false;
         var execution = (autoSignExecutions.GetValueOrDefault(plan.Key) ?? AutoSignExecution.New(plan.Key, clock.GetUtcNow()))
             .Begin(course, clock.GetUtcNow(), plan.Policy.Notification);
-        if (schoolNow < SubmissionDue(plan, execution) || schoolNow > SubmissionDeadline(plan, execution)) return false;
+        if (schoolNow < SubmissionDue(plan, execution) || PastSubmissionDeadline(plan, execution, schoolNow)) return false;
         if (execution.Submissions >= plan.Policy.MaxSubmissions || execution.Stage is AutoSignStage.Signed or AutoSignStage.Submitting) return false;
         var next = execution with { Submissions = execution.Submissions + 1, LastSubmissionAt = clock.GetUtcNow(),
             FirstNegativeAt = null, NegativeReads = 0, LastVerificationAttemptAt = null,
@@ -474,7 +498,7 @@ public sealed partial class AccountCoordinator
         if (!await SaveAutoSignAsync(epoch) || epoch != Generation || HasLocalSignSuccess(course)) return false;
         var latest = AutoSignPlans.FirstOrDefault(x => x.Key == plan.Key);
         return latest is not null && AutoSignAllowed(latest.Course) && next.Submissions <= latest.Policy.MaxSubmissions
-            && AutoSignNow >= SubmissionDue(latest, execution) && AutoSignNow <= SubmissionDeadline(latest, execution)
+            && AutoSignNow >= SubmissionDue(latest, execution) && !PastSubmissionDeadline(latest, execution, AutoSignNow)
             && CourseTime.InSignWindow(latest.Course, AutoSignNow);
     }
 
@@ -549,7 +573,16 @@ public sealed partial class AccountCoordinator
             return;
         }
         var deadline = SubmissionDeadline(plan, execution);
-        if (execution.Submissions == 0 && schoolNow > deadline)
+        if (plan.Policy.MissedAction == AutoSignMissedAction.UntilClassStarts && schoolNow >= deadline)
+        {
+            await RefreshAsync(CourseTime.Date(course.Day));
+            if (epoch != Generation) return;
+            execution = autoSignExecutions.GetValueOrDefault(plan.Key) ?? execution;
+            if (execution.Stage != AutoSignStage.Signed && !HasLocalSignSuccess(course))
+                await SetAutoSignStageAsync(execution, AutoSignStage.NeedsAttention, "已到上课时间", epoch);
+            return;
+        }
+        if (execution.Submissions == 0 && PastSubmissionDeadline(plan, execution, schoolNow))
         {
             await SetAutoSignStageAsync(execution, AutoSignStage.Missed,
                 "已错过自动执行时间，请手动处理", epoch);
@@ -563,7 +596,8 @@ public sealed partial class AccountCoordinator
         }
         var verifyOnly = execution.Submissions > 0 && (execution.Submissions >= plan.Policy.MaxSubmissions
             || execution.LastSchoolSubmissionAt is null || !plan.IsParticipating || plan.Stage == AutoSignStage.Skipped
-            || execution.Stage is AutoSignStage.NeedsAttention or AutoSignStage.Missed || schoolNow > deadline);
+            || execution.Stage == AutoSignStage.NeedsAttention && fixedAutoSignPolicy is null
+            || execution.Stage == AutoSignStage.Missed || PastSubmissionDeadline(plan, execution, schoolNow));
         if (verifyOnly)
         {
             await RefreshAsync(CourseTime.Date(course.Day));
@@ -584,7 +618,19 @@ public sealed partial class AccountCoordinator
         }
         if (execution.Submissions > 0)
         {
-            if (execution.NegativeReads < 2)
+            if (fixedAutoSignPolicy is not null)
+            {
+                await RefreshAsync(CourseTime.Date(course.Day));
+                if (epoch != Generation) return;
+                execution = autoSignExecutions.GetValueOrDefault(plan.Key) ?? execution;
+                if (execution.Stage is AutoSignStage.Signed or AutoSignStage.Skipped || HasLocalSignSuccess(course)) return;
+                if (!HasFreshAutoSignNegative(course, execution, requireQuorumSpacing: false))
+                {
+                    await SetAutoSignNextAtAsync(execution, clock.GetUtcNow().AddMinutes(plan.Policy.RetryMinutes), epoch, clock.GetUtcNow());
+                    return;
+                }
+            }
+            else if (execution.NegativeReads < 2)
             {
                 if (execution.FirstSchoolNegativeAt is { } firstSchool && AutoSignNow < firstSchool.AddSeconds(30)) return;
                 await RefreshAsync(CourseTime.Date(course.Day));
@@ -617,13 +663,19 @@ public sealed partial class AccountCoordinator
                 if (execution.NegativeReads < 2) return;
             }
         }
-        else if (!CachePolicy.Fresh(dayVerifiedAt.GetValueOrDefault(course.Day), now, TimeSpan.FromSeconds(60)))
+        else if (fixedAutoSignPolicy is not null || !CachePolicy.Fresh(dayVerifiedAt.GetValueOrDefault(course.Day), now, TimeSpan.FromSeconds(60)))
             await RefreshAsync(CourseTime.Date(course.Day));
-        if (epoch != Generation || AttendanceStatusFor(course) != AttendanceStatus.Unsigned || HasLocalSignSuccess(course)) return;
+        if (epoch != Generation || HasLocalSignSuccess(course)) return;
+        if (AttendanceStatusFor(course) != AttendanceStatus.Unsigned || !IsFresh(course))
+        {
+            if (fixedAutoSignPolicy is not null && AttendanceStatusFor(course) != AttendanceStatus.Signed)
+                await SetAutoSignNextAtAsync(execution, clock.GetUtcNow().AddMinutes(plan.Policy.RetryMinutes), epoch, clock.GetUtcNow());
+            return;
+        }
         execution = autoSignExecutions.GetValueOrDefault(plan.Key) ?? execution;
         plan = AutoSignPlans.FirstOrDefault(x => x.Key == plan.Key);
         if (plan is null || !AutoSignAllowed(plan.Course) || AutoSignNow < SubmissionDue(plan, execution)
-            || AutoSignNow > SubmissionDeadline(plan, execution) || !CourseTime.InSignWindow(plan.Course, AutoSignNow)) return;
+            || PastSubmissionDeadline(plan, execution, AutoSignNow) || !CourseTime.InSignWindow(plan.Course, AutoSignNow)) return;
         await SignAsync(plan.Course, epoch, true);
     }
 }

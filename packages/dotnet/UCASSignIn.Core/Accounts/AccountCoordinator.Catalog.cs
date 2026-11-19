@@ -67,7 +67,7 @@ public sealed partial class AccountCoordinator
     public bool IsSignInDisabled(string? courseId) => courseId is not null && CoursePreferencesFor(courseId).SignInDisabled;
     public bool EffectiveConfirmation(string? courseId) => !IsSignInDisabled(courseId) && (courseId is null
         ? Preferences.ConfirmBeforeSign : CoursePreferences.Resolve(CoursePreferencesFor(courseId).Confirmation, Preferences.ConfirmBeforeSign));
-    public bool EffectiveAutoSign(string? courseId) => Preferences.AutoSignIsRunning && !IsSignInDisabled(courseId) && (courseId is null
+    public bool EffectiveAutoSign(string? courseId) => Preferences.AutoSignIsRunning && !IsSignInDisabled(courseId) && (fixedAutoSignPolicy is not null || courseId is null
         || CoursePreferences.Resolve(CoursePreferencesFor(courseId).AutoSign, true));
     public bool EffectiveReminders(string? courseId) => courseId is null ? Preferences.RemindersEnabled
         : CoursePreferences.Resolve(CoursePreferencesFor(courseId).Reminders, Preferences.RemindersEnabled);
